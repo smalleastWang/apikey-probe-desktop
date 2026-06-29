@@ -163,6 +163,13 @@ h2 {
   margin-left: 3px;
 }
 
+.field-help {
+  color: #667085;
+  font-size: 12px;
+  line-height: 1.6;
+  margin: 0;
+}
+
 input,
 select,
 textarea {

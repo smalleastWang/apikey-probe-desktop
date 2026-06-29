@@ -48,6 +48,13 @@ const modelOptions = [
   { value: "moonshot-v1-8k", label: "Moonshot: moonshot-v1-8k" },
 ] as const;
 
+const protocolInferenceNotes: Record<ProbeConfig["protocolType"], string> = {
+  "openai-compatible": "常见 GPT / DeepSeek / Qwen / Moonshot / Kimi 等模型默认按 OpenAI-compatible 检测",
+  "openai-responses": "模型名通常无法单独判断 Responses API，需要按上游文档手动选择",
+  "anthropic-messages": "Claude 系列模型默认按 Anthropic Messages API 检测",
+  "google-gemini": "Gemini 系列模型默认按 Google Gemini API 检测",
+};
+
 const initialConfig: ProbeConfig = {
   baseUrl: "",
   apiKey: "",
@@ -76,6 +83,7 @@ function App() {
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [exportMessage, setExportMessage] = useState<string | null>(null);
+  const inferredProtocol = inferProtocolType(config.model);
 
   useEffect(() => {
     const unlistenPromise = listenProbeProgress((progress) => {
@@ -213,6 +221,12 @@ function App() {
                   </option>
                 ))}
               </select>
+              {inferredProtocol && (
+                <p className="field-help">
+                  已根据模型名推测：{protocolOptions.find((item) => item.value === inferredProtocol)?.label}。
+                  {protocolInferenceNotes[inferredProtocol]}
+                </p>
+              )}
             </Field>
             <Field label="供应商名称">
               <input
@@ -307,7 +321,18 @@ function App() {
   );
 
   function updateConfig<K extends keyof ProbeConfig>(key: K, value: ProbeConfig[K]) {
-    setConfig((current) => ({ ...current, [key]: value }));
+    setConfig((current) => {
+      if (key !== "model" || typeof value !== "string") {
+        return { ...current, [key]: value };
+      }
+
+      const inferred = inferProtocolType(value);
+      return {
+        ...current,
+        model: value,
+        protocolType: inferred ?? current.protocolType,
+      };
+    });
   }
 }
 
@@ -426,6 +451,29 @@ function normalizeConfig(config: ProbeConfig): ProbeConfig {
 function optional(value?: string) {
   const trimmed = value?.trim();
   return trimmed ? trimmed : undefined;
+}
+
+function inferProtocolType(model: string): ProbeConfig["protocolType"] | null {
+  const normalized = model.trim().toLowerCase();
+  if (!normalized) return null;
+
+  if (/(^|[/_-])claude($|[\d._-])/.test(normalized) || normalized.includes("anthropic")) {
+    return "anthropic-messages";
+  }
+
+  if (/(^|[/_-])gemini($|[\d._-])/.test(normalized) || normalized.includes("models/gemini")) {
+    return "google-gemini";
+  }
+
+  if (
+    /(^|[/_-])(gpt|o[134]|chatgpt|deepseek|qwen|qwq|moonshot|kimi|glm|doubao|yi|llama|mistral)($|[\d._:-])/.test(
+      normalized,
+    )
+  ) {
+    return "openai-compatible";
+  }
+
+  return null;
 }
 
 export default App;
