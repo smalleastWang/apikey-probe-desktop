@@ -1,0 +1,14 @@
+node_modules/
+dist/
+
+src-tauri/target/
+target/
+
+.cargo-home/
+.cargo-home-*/
+.pdf-deps/
+
+upstream-model-*
+
+.DS_Store
+*.log
