@@ -24,7 +24,7 @@ async fn main() -> ExitCode {
 async fn run() -> Result<u8> {
     let args = env::args().skip(1).collect::<Vec<_>>();
     if args.is_empty() {
-        return run_check_interactive().await;
+        return run_interactive().await;
     }
 
     if args[0] == "--help" || args[0] == "-h" {
@@ -32,18 +32,10 @@ async fn run() -> Result<u8> {
         return Ok(0);
     }
 
-    match args[0].as_str() {
-        "check" => run_check(&args[1..]).await,
-        "interactive" | "wizard" => run_check_interactive().await,
-        command => {
-            eprintln!("unknown command: {command}");
-            print_help();
-            Ok(64)
-        }
-    }
+    run_with_args(&args).await
 }
 
-async fn run_check(args: &[String]) -> Result<u8> {
+async fn run_with_args(args: &[String]) -> Result<u8> {
     let options = if args.is_empty() || args.iter().any(|arg| arg == "--interactive" || arg == "-i")
     {
         CheckOptions::prompt()?
@@ -53,7 +45,7 @@ async fn run_check(args: &[String]) -> Result<u8> {
     run_check_with_options(options).await
 }
 
-async fn run_check_interactive() -> Result<u8> {
+async fn run_interactive() -> Result<u8> {
     run_check_with_options(CheckOptions::prompt()?).await
 }
 
@@ -218,10 +210,10 @@ impl CheckOptions {
                     options.fail_on = FailOn::parse(&take_value(args, &mut index, "--fail-on")?)?
                 }
                 "--help" | "-h" => {
-                    print_check_help();
+                    print_help();
                     std::process::exit(0);
                 }
-                flag => return Err(anyhow!("unknown option for check: {flag}")),
+                flag => return Err(anyhow!("unknown option: {flag}")),
             }
             index += 1;
         }
@@ -460,21 +452,7 @@ fn print_help() {
 
 Usage:
   apikey-probe
-  apikey-probe check [options]
-  apikey-probe check
-  apikey-probe interactive
-
-Commands:
-  check        Probe one upstream API key and model, prompts when no options are provided
-  interactive  Start terminal prompts for all required fields
-
-Run `apikey-probe check --help` for command options."#
-    );
-}
-
-fn print_check_help() {
-    println!(
-        r#"apikey-probe check
+  apikey-probe [options]
 
 Required:
   --base-url <url>                  Upstream base URL
@@ -499,14 +477,12 @@ Options:
 
 Examples:
   apikey-probe
-  apikey-probe check
-  apikey-probe interactive
-  apikey-probe check --interactive
+  apikey-probe --interactive
 
-  apikey-probe check --base-url https://api.example.com/v1 \
+  apikey-probe --base-url https://api.example.com/v1 \
     --api-key-env UPSTREAM_API_KEY --model gpt-4o --format markdown --out report.md
 
-  printf "%s" "$UPSTREAM_API_KEY" | apikey-probe check \
+  printf "%s" "$UPSTREAM_API_KEY" | apikey-probe \
     --base-url https://api.example.com/v1 --api-key-stdin --model claude-3-5-sonnet-latest"#
     );
 }
