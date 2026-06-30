@@ -1,7 +1,4 @@
-use crate::probe::{
-    self,
-    types::{ProbeConfig, ProbeProgress, ProbeReport},
-};
+use apikey_probe_core::{self as probe_core, ProbeConfig, ProbeProgress, ProbeReport};
 use std::path::PathBuf;
 use tauri::{AppHandle, Emitter};
 
@@ -14,19 +11,24 @@ pub async fn run_openai_compatible_probe(
         let _ = app.emit("probe-progress", progress);
     };
 
-    probe::run_openai_compatible_probe(config, &emit_progress)
+    probe_core::run_probe(config, &emit_progress)
         .await
         .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 pub fn export_report_json(report: ProbeReport) -> Result<String, String> {
-    serde_json::to_string_pretty(&report).map_err(|error| error.to_string())
+    probe_core::to_json(&report).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 pub fn export_report_markdown(report: ProbeReport) -> Result<String, String> {
-    Ok(probe::to_markdown(&report))
+    Ok(probe_core::to_markdown(&report))
+}
+
+#[tauri::command]
+pub fn infer_protocol_type(model: String) -> Option<String> {
+    probe_core::infer_protocol_type(&model).map(str::to_string)
 }
 
 #[tauri::command]

@@ -15,6 +15,10 @@ export function exportReportMarkdown(report: ProbeReport) {
   return invoke<string>("export_report_markdown", { report });
 }
 
+export function inferProtocolType(model: string) {
+  return invoke<ProbeConfig["protocolType"] | null>("infer_protocol_type", { model });
+}
+
 export async function chooseExportDirectory() {
   const selected = await open({
     directory: true,

@@ -1,0 +1,16 @@
+[package]
+name = "apikey-probe-cli"
+version = "0.1.0"
+description = "CLI for upstream API key and model probing"
+edition = "2021"
+
+[[bin]]
+name = "apikey-probe"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+apikey-probe-core = { path = "../probe-core" }
+dialoguer = "0.12.0"
+rpassword = "7.5.4"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

@@ -1,5 +1,4 @@
 mod commands;
-mod probe;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -9,6 +8,7 @@ pub fn run() {
             commands::run_openai_compatible_probe,
             commands::export_report_json,
             commands::export_report_markdown,
+            commands::infer_protocol_type,
             commands::save_report_file
         ])
         .run(tauri::generate_context!())

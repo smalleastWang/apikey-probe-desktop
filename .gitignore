@@ -10,6 +10,8 @@ target/
 .pdf-deps/
 
 upstream-model-*
+report.json
+report.md
 
 .DS_Store
 *.log

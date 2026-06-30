@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   chooseExportDirectory,
   exportReportJson,
   exportReportMarkdown,
+  inferProtocolType,
   listenProbeProgress,
   runProbe,
   saveReportFile,
@@ -49,8 +50,8 @@ const modelOptions = [
 ] as const;
 
 const protocolInferenceNotes: Record<ProbeConfig["protocolType"], string> = {
-  "openai-compatible": "常见 GPT / DeepSeek / Qwen / Moonshot / Kimi 等模型默认按 OpenAI-compatible 检测",
-  "openai-responses": "模型名通常无法单独判断 Responses API，需要按上游文档手动选择",
+  "openai-compatible": "常见 GPT 4 / DeepSeek / Qwen / Moonshot / Kimi 等模型默认按 OpenAI-compatible 检测",
+  "openai-responses": "GPT 5 系列模型默认按 OpenAI Responses API 检测",
   "anthropic-messages": "Claude 系列模型默认按 Anthropic Messages API 检测",
   "google-gemini": "Gemini 系列模型默认按 Google Gemini API 检测",
 };
@@ -83,7 +84,8 @@ function App() {
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [exportMessage, setExportMessage] = useState<string | null>(null);
-  const inferredProtocol = inferProtocolType(config.model);
+  const [inferredProtocol, setInferredProtocol] = useState<ProbeConfig["protocolType"] | null>(null);
+  const modelInferenceRequest = useRef(0);
 
   useEffect(() => {
     const unlistenPromise = listenProbeProgress((progress) => {
@@ -200,7 +202,7 @@ function App() {
                 list="model-options"
                 placeholder="选择常用模型或手动输入，例如 vendor-model-2026"
                 value={config.model}
-                onChange={(event) => updateConfig("model", event.target.value)}
+                onChange={(event) => void updateModel(event.target.value)}
               />
               <datalist id="model-options">
                 {modelOptions.map((option) => (
@@ -321,18 +323,26 @@ function App() {
   );
 
   function updateConfig<K extends keyof ProbeConfig>(key: K, value: ProbeConfig[K]) {
-    setConfig((current) => {
-      if (key !== "model" || typeof value !== "string") {
-        return { ...current, [key]: value };
-      }
+    setConfig((current) => ({ ...current, [key]: value }));
+  }
 
-      const inferred = inferProtocolType(value);
-      return {
-        ...current,
-        model: value,
-        protocolType: inferred ?? current.protocolType,
-      };
-    });
+  async function updateModel(model: string) {
+    const requestId = modelInferenceRequest.current + 1;
+    modelInferenceRequest.current = requestId;
+    setConfig((current) => ({ ...current, model }));
+
+    try {
+      const inferred = await inferProtocolType(model);
+      if (modelInferenceRequest.current !== requestId) return;
+      setConfig((current) => {
+        if (current.model !== model) return current;
+        return inferred ? { ...current, protocolType: inferred } : current;
+      });
+      setInferredProtocol(inferred);
+    } catch {
+      if (modelInferenceRequest.current !== requestId) return;
+      setInferredProtocol(null);
+    }
   }
 }
 
@@ -451,29 +461,6 @@ function normalizeConfig(config: ProbeConfig): ProbeConfig {
 function optional(value?: string) {
   const trimmed = value?.trim();
   return trimmed ? trimmed : undefined;
-}
-
-function inferProtocolType(model: string): ProbeConfig["protocolType"] | null {
-  const normalized = model.trim().toLowerCase();
-  if (!normalized) return null;
-
-  if (/(^|[/_-])claude($|[\d._-])/.test(normalized) || normalized.includes("anthropic")) {
-    return "anthropic-messages";
-  }
-
-  if (/(^|[/_-])gemini($|[\d._-])/.test(normalized) || normalized.includes("models/gemini")) {
-    return "google-gemini";
-  }
-
-  if (
-    /(^|[/_-])(gpt|o[134]|chatgpt|deepseek|qwen|qwq|moonshot|kimi|glm|doubao|yi|llama|mistral)($|[\d._:-])/.test(
-      normalized,
-    )
-  ) {
-    return "openai-compatible";
-  }
-
-  return null;
 }
 
 export default App;

@@ -1,0 +1,7 @@
+[workspace]
+members = [
+  "src-tauri",
+  "crates/probe-core",
+  "crates/probe-cli",
+]
+resolver = "2"
