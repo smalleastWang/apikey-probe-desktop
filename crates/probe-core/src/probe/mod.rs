@@ -447,7 +447,7 @@ async fn probe_chat(
         "temperature": 0
     });
 
-    match client.post_chat_completions(payload).await {
+    match post_chat_completions_compat(client, payload).await {
         Ok(response) => {
             let preview = preview(&response.body);
             let check = if response.status < 400
@@ -507,7 +507,7 @@ async fn probe_tools(
         "temperature": 0
     });
 
-    match client.post_chat_completions(payload).await {
+    match post_chat_completions_compat(client, payload).await {
         Ok(response) => {
             let preview = preview(&response.body);
             let validation = validate_tool_call(response.json.as_ref());
@@ -555,7 +555,7 @@ async fn probe_stream(
         "temperature": 0
     });
 
-    match client.stream_chat_completions(payload).await {
+    match stream_chat_completions_compat(client, payload).await {
         Ok(response) => {
             let preview = preview(&response.body_preview);
             let check = if response.status < 400
@@ -623,7 +623,7 @@ async fn probe_json_mode(
         "temperature": 0
     });
 
-    match client.post_chat_completions(payload).await {
+    match post_chat_completions_compat(client, payload).await {
         Ok(response) => {
             let preview = preview(&response.body);
             let content = response
@@ -726,7 +726,7 @@ async fn probe_responses_chat(
         "temperature": 0
     });
 
-    match client.post_json_bearer(url, payload).await {
+    match post_json_bearer_compat(client, url, payload).await {
         Ok(response) => {
             let text = responses_text(response.json.as_ref());
             let check = if response.status < 400 && text.is_some() {
@@ -770,7 +770,7 @@ async fn probe_responses_tools(
         "temperature": 0
     });
 
-    match client.post_json_bearer(url, payload).await {
+    match post_json_bearer_compat(client, url, payload).await {
         Ok(response) => {
             let validation = validate_responses_function_call(response.json.as_ref());
             let check = match validation {
@@ -817,7 +817,7 @@ async fn probe_responses_stream(
     stream_check_from_result(
         "stream",
         "Stream 流式",
-        client.stream_json_bearer(url, payload).await,
+        stream_json_bearer_compat(client, url, payload).await,
     )
 }
 
@@ -848,7 +848,7 @@ async fn probe_responses_json_mode(
         "temperature": 0
     });
 
-    match client.post_json_bearer(url, payload).await {
+    match post_json_bearer_compat(client, url, payload).await {
         Ok(response) => {
             let ok = responses_text(response.json.as_ref())
                 .and_then(|text| serde_json::from_str::<Value>(&text).ok())
@@ -928,17 +928,12 @@ async fn probe_anthropic_chat(
 ) -> (CheckResult, Option<HttpProbeResponse>) {
     let payload = json!({
         "model": config.model.as_str(),
-        "max_tokens": 64,
+        "max_tokens": 1024,
         "messages": [{"role": "user", "content": "请只回复：probe-ok"}]
     });
     match client.post_json_with_headers(url, headers, payload).await {
         Ok(response) => {
-            let ok = response.status < 400
-                && response
-                    .json
-                    .as_ref()
-                    .and_then(|json| json.pointer("/content/0/text"))
-                    .is_some();
+            let ok = response.status < 400 && anthropic_text(response.json.as_ref()).is_some();
             let check = if ok {
                 CheckResult::pass("chat", "基础聊天", "Anthropic Messages 基础输出可用")
             } else {
@@ -964,7 +959,7 @@ async fn probe_anthropic_tools(
 ) -> (CheckResult, Option<HttpProbeResponse>) {
     let payload = json!({
         "model": config.model.as_str(),
-        "max_tokens": 256,
+        "max_tokens": 1024,
         "messages": [{"role": "user", "content": "请调用 get_weather 工具查询北京天气。"}],
         "tools": [{
             "name": "get_weather",
@@ -1018,7 +1013,7 @@ async fn probe_anthropic_stream(
 ) -> (CheckResult, Option<StreamProbeResponse>) {
     let payload = json!({
         "model": config.model.as_str(),
-        "max_tokens": 64,
+        "max_tokens": 1024,
         "stream": true,
         "messages": [{"role": "user", "content": "请用一句话回复 stream-probe-ok"}]
     });
@@ -1037,17 +1032,13 @@ async fn probe_anthropic_json_mode(
 ) -> (CheckResult, Option<HttpProbeResponse>) {
     let payload = json!({
         "model": config.model.as_str(),
-        "max_tokens": 128,
+        "max_tokens": 1024,
         "messages": [{"role": "user", "content": "只输出合法 JSON：{\"ok\":true,\"city\":\"北京\"}，不要 Markdown。"}]
     });
     match client.post_json_with_headers(url, headers, payload).await {
         Ok(response) => {
-            let ok = response
-                .json
-                .as_ref()
-                .and_then(|json| json.pointer("/content/0/text"))
-                .and_then(Value::as_str)
-                .and_then(|text| serde_json::from_str::<Value>(text).ok())
+            let ok = anthropic_text(response.json.as_ref())
+                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
                 .is_some();
             let check = if response.status < 400 && ok {
                 CheckResult::pass(
@@ -1397,6 +1388,102 @@ fn preview(body: &str) -> String {
         value.push_str("\n...");
     }
     value
+}
+
+/// 部分新一代模型（GPT-5 / o 系列 / 某些思考型 Claude 等）不再接受 `temperature`。
+/// 探针默认仍带 `temperature`（保证可复现），但一旦因该参数被拒（4xx 且错误信息包含
+/// temperature），自动去掉后重试一次，避免把实际可用的渠道误判为失败。
+fn rejected_for_temperature(response: &HttpProbeResponse) -> bool {
+    response.status >= 400 && response.body.to_ascii_lowercase().contains("temperature")
+}
+
+fn stream_rejected_for_temperature(response: &StreamProbeResponse) -> bool {
+    response.status >= 400
+        && response
+            .body_preview
+            .to_ascii_lowercase()
+            .contains("temperature")
+}
+
+fn remove_temperature(payload: &mut Value) -> bool {
+    payload
+        .as_object_mut()
+        .and_then(|object| object.remove("temperature"))
+        .is_some()
+}
+
+async fn post_chat_completions_compat(
+    client: &ProbeHttpClient,
+    payload: Value,
+) -> Result<HttpProbeResponse> {
+    let response = client.post_chat_completions(payload.clone()).await?;
+    if rejected_for_temperature(&response) {
+        let mut retry = payload;
+        if remove_temperature(&mut retry) {
+            return client.post_chat_completions(retry).await;
+        }
+    }
+    Ok(response)
+}
+
+async fn post_json_bearer_compat(
+    client: &ProbeHttpClient,
+    url: &str,
+    payload: Value,
+) -> Result<HttpProbeResponse> {
+    let response = client.post_json_bearer(url, payload.clone()).await?;
+    if rejected_for_temperature(&response) {
+        let mut retry = payload;
+        if remove_temperature(&mut retry) {
+            return client.post_json_bearer(url, retry).await;
+        }
+    }
+    Ok(response)
+}
+
+async fn stream_chat_completions_compat(
+    client: &ProbeHttpClient,
+    payload: Value,
+) -> Result<StreamProbeResponse> {
+    let response = client.stream_chat_completions(payload.clone()).await?;
+    if stream_rejected_for_temperature(&response) {
+        let mut retry = payload;
+        if remove_temperature(&mut retry) {
+            return client.stream_chat_completions(retry).await;
+        }
+    }
+    Ok(response)
+}
+
+async fn stream_json_bearer_compat(
+    client: &ProbeHttpClient,
+    url: &str,
+    payload: Value,
+) -> Result<StreamProbeResponse> {
+    let response = client.stream_json_bearer(url, payload.clone()).await?;
+    if stream_rejected_for_temperature(&response) {
+        let mut retry = payload;
+        if remove_temperature(&mut retry) {
+            return client.stream_json_bearer(url, retry).await;
+        }
+    }
+    Ok(response)
+}
+
+/// 从 Anthropic Messages 响应的 content 数组中取第一个 text 块。
+/// 思考型模型会把 thinking 块放在 content[0]，真正的回答文本在其后，
+/// 因此必须遍历查找而非固定读 content[0]，否则会把可用渠道误判为失败。
+fn anthropic_text(json: Option<&Value>) -> Option<String> {
+    json?.get("content")?.as_array()?.iter().find_map(|block| {
+        if block.get("type").and_then(Value::as_str) == Some("text") {
+            block
+                .get("text")
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+        } else {
+            None
+        }
+    })
 }
 
 fn super_placeholder_conclusion() -> OverallConclusion {
