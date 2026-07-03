@@ -7,6 +7,16 @@ use reqwest::{
 };
 use serde_json::Value;
 use std::{collections::BTreeMap, time::Duration};
+use tokio::time::{timeout_at, Instant};
+
+/// 单个请求（含读取完整响应体）的总超时。
+const REQUEST_TIMEOUT_SECS: u64 = 120;
+/// 建立 TCP/TLS 连接的超时。
+const CONNECT_TIMEOUT_SECS: u64 = 30;
+/// 读取单个响应体分片的超时（覆盖流式场景下的"假死"连接）。
+const READ_TIMEOUT_SECS: u64 = 60;
+/// 读取 SSE 流的总时长上限，超时后使用已收到的部分数据，避免无限等待。
+const STREAM_TOTAL_TIMEOUT_SECS: u64 = 90;
 
 pub struct ProbeHttpClient {
     client: Client,
@@ -17,8 +27,12 @@ pub struct ProbeHttpClient {
 impl ProbeHttpClient {
     pub fn new(config: &ProbeConfig) -> Result<Self> {
         let mut builder = Client::builder()
-            .timeout(Duration::from_secs(45))
-            .connect_timeout(Duration::from_secs(15))
+            // 整个请求（含读取完整响应体）的总超时。
+            .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
+            // 建立连接超时。
+            .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
+            // 单次读取响应体分片的超时，避免中转/代理在流式场景下"假死"占用连接。
+            .read_timeout(Duration::from_secs(READ_TIMEOUT_SECS))
             .user_agent("apikey-probe-desktop/0.1");
 
         if let Some(proxy_url) = config
@@ -128,58 +142,7 @@ impl ProbeHttpClient {
             .await
             .context("stream request failed")?;
 
-        let status = response.status().as_u16();
-        let headers = collect_headers(response.headers());
-        let mut stream = response.bytes_stream();
-        let mut chunks_seen = 0usize;
-        let mut data_events_seen = 0usize;
-        let mut done_seen = false;
-        let mut invalid_json_events = 0usize;
-        let mut buffer = String::new();
-        let mut body_preview = String::new();
-
-        while let Some(item) = stream.next().await {
-            let bytes = item.context("failed to read stream chunk")?;
-            chunks_seen += 1;
-            let chunk = String::from_utf8_lossy(&bytes);
-
-            if body_preview.len() < 4_000 {
-                body_preview.push_str(&chunk);
-                body_preview.truncate(4_000);
-            }
-
-            buffer.push_str(&chunk);
-
-            while let Some(line_end) = buffer.find('\n') {
-                let line = buffer[..line_end].trim().to_string();
-                buffer = buffer[line_end + 1..].to_string();
-
-                if let Some(data) = line.strip_prefix("data:") {
-                    let data = data.trim();
-                    data_events_seen += 1;
-
-                    if data == "[DONE]" {
-                        done_seen = true;
-                    } else if serde_json::from_str::<Value>(data).is_err() {
-                        invalid_json_events += 1;
-                    }
-                }
-            }
-
-            if done_seen || chunks_seen >= 80 || body_preview.len() >= 4_000 {
-                break;
-            }
-        }
-
-        Ok(StreamProbeResponse {
-            status,
-            headers,
-            chunks_seen,
-            data_events_seen,
-            done_seen,
-            invalid_json_events,
-            body_preview,
-        })
+        read_sse_response(response).await
     }
 
     pub async fn stream_json_with_headers(
@@ -221,7 +184,17 @@ async fn read_sse_response(response: reqwest::Response) -> Result<StreamProbeRes
     let mut buffer = String::new();
     let mut body_preview = String::new();
 
-    while let Some(item) = stream.next().await {
+    // 整个 SSE 读取过程的总时长上限；一旦超时，用已收到的部分数据做判定，避免无限"检测中"。
+    let deadline = Instant::now() + Duration::from_secs(STREAM_TOTAL_TIMEOUT_SECS);
+
+    loop {
+        let item = match timeout_at(deadline, stream.next()).await {
+            Ok(Some(item)) => item,
+            // 流正常结束。
+            Ok(None) => break,
+            // 达到总时长上限，停止读取并使用已收集到的数据。
+            Err(_elapsed) => break,
+        };
         let bytes = item.context("failed to read stream chunk")?;
         chunks_seen += 1;
         let chunk = String::from_utf8_lossy(&bytes);

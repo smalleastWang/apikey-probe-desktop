@@ -1,10 +1,27 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { ProbeConfig, ProbeProgress, ProbeReport } from "../types";
+import type {
+  MultiProtocolProbeConfig,
+  MultiProtocolProbeReport,
+  ProbeConfig,
+  ProbeProgress,
+  ProbeReport,
+} from "../types";
 
-export function runProbe(config: ProbeConfig) {
-  return invoke<ProbeReport>("run_openai_compatible_probe", { config });
+export function runProbe(config: ProbeConfig, sessionId: string) {
+  return invoke<ProbeReport>("run_openai_compatible_probe", { config, sessionId });
+}
+
+export function runMultiProtocolProbe(config: MultiProtocolProbeConfig, sessionId: string) {
+  return invoke<MultiProtocolProbeReport>("run_multi_protocol_probe", { config, sessionId });
+}
+
+/** 后端主动取消返回的标记，前端据此把结果显示为"已取消"而非错误。 */
+export const CANCELED_MESSAGE = "PROBE_CANCELED";
+
+export function cancelProbe(sessionId: string) {
+  return invoke<void>("cancel_probe", { sessionId });
 }
 
 export function exportReportJson(report: ProbeReport) {
@@ -13,6 +30,14 @@ export function exportReportJson(report: ProbeReport) {
 
 export function exportReportMarkdown(report: ProbeReport) {
   return invoke<string>("export_report_markdown", { report });
+}
+
+export function exportMultiReportJson(report: MultiProtocolProbeReport) {
+  return invoke<string>("export_multi_report_json", { report });
+}
+
+export function exportMultiReportMarkdown(report: MultiProtocolProbeReport) {
+  return invoke<string>("export_multi_report_markdown", { report });
 }
 
 export function inferProtocolType(model: string) {
@@ -33,6 +58,10 @@ export function saveReportFile(directory: string, filename: string, content: str
   return invoke<string>("save_report_file", { directory, filename, content });
 }
 
-export function listenProbeProgress(callback: (progress: ProbeProgress) => void) {
-  return listen<ProbeProgress>("probe-progress", (event) => callback(event.payload));
+export function listenProbeProgress(
+  sessionId: string,
+  callback: (progress: ProbeProgress) => void,
+) {
+  const eventName = sessionId ? `probe-progress:${sessionId}` : "probe-progress";
+  return listen<ProbeProgress>(eventName, (event) => callback(event.payload));
 }

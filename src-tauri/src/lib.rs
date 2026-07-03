@@ -4,10 +4,15 @@ mod commands;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .manage(commands::ProbeCancellation::default())
         .invoke_handler(tauri::generate_handler![
             commands::run_openai_compatible_probe,
+            commands::run_multi_protocol_probe,
+            commands::cancel_probe,
             commands::export_report_json,
             commands::export_report_markdown,
+            commands::export_multi_report_json,
+            commands::export_multi_report_markdown,
             commands::infer_protocol_type,
             commands::save_report_file
         ])

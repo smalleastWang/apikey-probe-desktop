@@ -13,7 +13,6 @@ pub struct ProbeConfig {
     pub provider_name: Option<String>,
     pub note: Option<String>,
     pub proxy_url: Option<String>,
-    pub save_api_key: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -26,7 +25,6 @@ pub struct RedactedProbeConfig {
     pub provider_name: Option<String>,
     pub note: Option<String>,
     pub proxy_url: Option<String>,
-    pub save_api_key: bool,
 }
 
 impl From<&ProbeConfig> for RedactedProbeConfig {
@@ -39,7 +37,6 @@ impl From<&ProbeConfig> for RedactedProbeConfig {
             provider_name: config.provider_name.clone(),
             note: config.note.clone(),
             proxy_url: config.proxy_url.clone(),
-            save_api_key: config.save_api_key,
         }
     }
 }
@@ -51,6 +48,8 @@ pub struct ProbeProgress {
     pub label: String,
     pub status: StepStatus,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -177,6 +176,44 @@ pub struct ProbeReport {
     pub conclusion_text: String,
     pub checks: Vec<CheckResult>,
     pub risk: RiskAssessment,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MultiProtocolProbeConfig {
+    pub base_url: String,
+    pub api_key: String,
+    pub model: String,
+    pub protocol_types: Vec<String>,
+    pub provider_name: Option<String>,
+    pub note: Option<String>,
+    pub proxy_url: Option<String>,
+}
+
+impl MultiProtocolProbeConfig {
+    pub fn to_single(&self, protocol_type: &str) -> ProbeConfig {
+        ProbeConfig {
+            base_url: self.base_url.clone(),
+            api_key: self.api_key.clone(),
+            model: self.model.clone(),
+            protocol_type: protocol_type.to_string(),
+            provider_name: self.provider_name.clone(),
+            note: self.note.clone(),
+            proxy_url: self.proxy_url.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MultiProtocolProbeReport {
+    pub generated_at: DateTime<Utc>,
+    pub model: String,
+    pub provider_name: Option<String>,
+    pub conclusion: OverallConclusion,
+    pub conclusion_text: String,
+    pub best_protocol: Option<String>,
+    pub results: Vec<ProbeReport>,
 }
 
 #[derive(Debug, Clone)]

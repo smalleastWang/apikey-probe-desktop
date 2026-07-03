@@ -12,7 +12,6 @@ export type ProbeConfig = {
   providerName?: string;
   note?: string;
   proxyUrl?: string;
-  saveApiKey: boolean;
 };
 
 export type StepStatus = "PENDING" | "RUNNING" | "PASS" | "WARN" | "FAIL";
@@ -26,6 +25,7 @@ export type ProbeProgress = {
   label: string;
   status: StepStatus;
   message: string;
+  protocol?: string;
 };
 
 export type CheckResult = {
@@ -58,4 +58,24 @@ export type ProbeReport = {
   conclusionText: string;
   checks: CheckResult[];
   risk: RiskAssessment;
+};
+
+export type MultiProtocolProbeConfig = {
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  protocolTypes: ProtocolType[];
+  providerName?: string;
+  note?: string;
+  proxyUrl?: string;
+};
+
+export type MultiProtocolProbeReport = {
+  generatedAt: string;
+  model: string;
+  providerName?: string;
+  conclusion: OverallConclusion;
+  conclusionText: string;
+  bestProtocol?: ProtocolType;
+  results: ProbeReport[];
 };

@@ -9,11 +9,13 @@ use self::{
     risk::assess_risk,
     types::{
         CheckResult, CheckStatus, HttpProbeResponse, OverallConclusion, ProbeConfig, ProbeProgress,
-        ProbeReport, RedactedProbeConfig, RiskAssessment, StepStatus, StreamProbeResponse,
+        ProbeReport, RedactedProbeConfig, RiskAssessment, RiskLevel, StepStatus,
+        StreamProbeResponse,
     },
 };
 use anyhow::Result;
 use chrono::Utc;
+use futures_util::future::join3;
 use serde_json::{json, Value};
 
 pub use report::to_markdown;
@@ -56,44 +58,57 @@ async fn run_openai_chat_probe<'a>(
     if let Some(response) = chat_response {
         http_responses.push(response);
     }
+    let chat_passed = chat_check.status != CheckStatus::Fail;
     checks.push(chat_check);
 
-    progress(step(
-        "tools",
-        "Tools / Function Calling",
-        StepStatus::Running,
-        "正在强制模型调用 get_weather",
-    ));
-    let (tools_check, tools_response) = probe_tools(&client, &config).await;
-    progress(step_from_check(&tools_check));
-    if let Some(response) = tools_response {
-        http_responses.push(response);
-    }
-    checks.push(tools_check);
+    let stream_response = if chat_passed {
+        progress(step(
+            "tools",
+            "Tools / Function Calling",
+            StepStatus::Running,
+            "正在强制模型调用 get_weather",
+        ));
+        progress(step(
+            "stream",
+            "Stream 流式",
+            StepStatus::Running,
+            "正在检测 SSE 流式格式",
+        ));
+        progress(step(
+            "json_mode",
+            "JSON Mode",
+            StepStatus::Running,
+            "正在检测 response_format json_object",
+        ));
 
-    progress(step(
-        "stream",
-        "Stream 流式",
-        StepStatus::Running,
-        "正在检测 SSE 流式格式",
-    ));
-    let (stream_check, stream_result) = probe_stream(&client, &config).await;
-    progress(step_from_check(&stream_check));
-    let stream_response = stream_result;
-    checks.push(stream_check);
+        let ((tools_check, tools_response), (stream_check, stream_result), (json_mode_check, json_mode_response)) =
+            join3(
+                probe_tools(&client, &config),
+                probe_stream(&client, &config),
+                probe_json_mode(&client, &config),
+            )
+            .await;
 
-    progress(step(
-        "json_mode",
-        "JSON Mode",
-        StepStatus::Running,
-        "正在检测 response_format json_object",
-    ));
-    let (json_mode_check, json_mode_response) = probe_json_mode(&client, &config).await;
-    progress(step_from_check(&json_mode_check));
-    if let Some(response) = json_mode_response {
-        http_responses.push(response);
-    }
-    checks.push(json_mode_check);
+        progress(step_from_check(&tools_check));
+        progress(step_from_check(&stream_check));
+        progress(step_from_check(&json_mode_check));
+
+        if let Some(response) = tools_response {
+            http_responses.push(response);
+        }
+        if let Some(response) = json_mode_response {
+            http_responses.push(response);
+        }
+
+        checks.push(tools_check);
+        checks.push(stream_check);
+        checks.push(json_mode_check);
+
+        stream_result
+    } else {
+        push_skipped_checks(progress, &mut checks);
+        None
+    };
 
     progress(step(
         "error_format",
@@ -119,12 +134,7 @@ async fn run_openai_chat_probe<'a>(
 
     let report = build_report(&config, checks, risk);
 
-    progress(step(
-        "risk",
-        "逆向风险评分",
-        StepStatus::Pass,
-        "风险评分完成",
-    ));
+    progress(risk_step(&report.risk));
     Ok(report)
 }
 
@@ -148,43 +158,57 @@ async fn run_openai_responses_probe<'a>(
     if let Some(response) = chat_response {
         http_responses.push(response);
     }
+    let chat_passed = chat_check.status != CheckStatus::Fail;
     checks.push(chat_check);
 
-    progress(step(
-        "tools",
-        "Tools / Function Calling",
-        StepStatus::Running,
-        "正在检测 Responses function_call",
-    ));
-    let (tools_check, tools_response) = probe_responses_tools(&client, &config, &url).await;
-    progress(step_from_check(&tools_check));
-    if let Some(response) = tools_response {
-        http_responses.push(response);
-    }
-    checks.push(tools_check);
+    let stream_response = if chat_passed {
+        progress(step(
+            "tools",
+            "Tools / Function Calling",
+            StepStatus::Running,
+            "正在检测 Responses function_call",
+        ));
+        progress(step(
+            "stream",
+            "Stream 流式",
+            StepStatus::Running,
+            "正在检测 Responses SSE",
+        ));
+        progress(step(
+            "json_mode",
+            "JSON Mode",
+            StepStatus::Running,
+            "正在检测 Responses JSON schema",
+        ));
 
-    progress(step(
-        "stream",
-        "Stream 流式",
-        StepStatus::Running,
-        "正在检测 Responses SSE",
-    ));
-    let (stream_check, stream_response) = probe_responses_stream(&client, &config, &url).await;
-    progress(step_from_check(&stream_check));
-    checks.push(stream_check);
+        let ((tools_check, tools_response), (stream_check, stream_result), (json_check, json_response)) =
+            join3(
+                probe_responses_tools(&client, &config, &url),
+                probe_responses_stream(&client, &config, &url),
+                probe_responses_json_mode(&client, &config, &url),
+            )
+            .await;
 
-    progress(step(
-        "json_mode",
-        "JSON Mode",
-        StepStatus::Running,
-        "正在检测 Responses JSON schema",
-    ));
-    let (json_check, json_response) = probe_responses_json_mode(&client, &config, &url).await;
-    progress(step_from_check(&json_check));
-    if let Some(response) = json_response {
-        http_responses.push(response);
-    }
-    checks.push(json_check);
+        progress(step_from_check(&tools_check));
+        progress(step_from_check(&stream_check));
+        progress(step_from_check(&json_check));
+
+        if let Some(response) = tools_response {
+            http_responses.push(response);
+        }
+        if let Some(response) = json_response {
+            http_responses.push(response);
+        }
+
+        checks.push(tools_check);
+        checks.push(stream_check);
+        checks.push(json_check);
+
+        stream_result
+    } else {
+        push_skipped_checks(progress, &mut checks);
+        None
+    };
 
     progress(step(
         "error_format",
@@ -208,12 +232,7 @@ async fn run_openai_responses_probe<'a>(
     let response_refs = http_responses.iter().collect::<Vec<_>>();
     let risk = assess_risk(&config, &checks, &response_refs, stream_response.as_ref());
     let report = build_report(&config, checks, risk);
-    progress(step(
-        "risk",
-        "逆向风险评分",
-        StepStatus::Pass,
-        "风险评分完成",
-    ));
+    progress(risk_step(&report.risk));
     Ok(report)
 }
 
@@ -238,46 +257,57 @@ async fn run_anthropic_messages_probe<'a>(
     if let Some(response) = chat_response {
         http_responses.push(response);
     }
+    let chat_passed = chat_check.status != CheckStatus::Fail;
     checks.push(chat_check);
 
-    progress(step(
-        "tools",
-        "Tools / Function Calling",
-        StepStatus::Running,
-        "正在检测 Anthropic tool_use",
-    ));
-    let (tools_check, tools_response) =
-        probe_anthropic_tools(&client, &config, &url, &headers).await;
-    progress(step_from_check(&tools_check));
-    if let Some(response) = tools_response {
-        http_responses.push(response);
-    }
-    checks.push(tools_check);
+    let stream_response = if chat_passed {
+        progress(step(
+            "tools",
+            "Tools / Function Calling",
+            StepStatus::Running,
+            "正在检测 Anthropic tool_use",
+        ));
+        progress(step(
+            "stream",
+            "Stream 流式",
+            StepStatus::Running,
+            "正在检测 Anthropic SSE",
+        ));
+        progress(step(
+            "json_mode",
+            "JSON Mode",
+            StepStatus::Running,
+            "正在检测 Anthropic JSON 等效输出",
+        ));
 
-    progress(step(
-        "stream",
-        "Stream 流式",
-        StepStatus::Running,
-        "正在检测 Anthropic SSE",
-    ));
-    let (stream_check, stream_response) =
-        probe_anthropic_stream(&client, &config, &url, &headers).await;
-    progress(step_from_check(&stream_check));
-    checks.push(stream_check);
+        let ((tools_check, tools_response), (stream_check, stream_result), (json_check, json_response)) =
+            join3(
+                probe_anthropic_tools(&client, &config, &url, &headers),
+                probe_anthropic_stream(&client, &config, &url, &headers),
+                probe_anthropic_json_mode(&client, &config, &url, &headers),
+            )
+            .await;
 
-    progress(step(
-        "json_mode",
-        "JSON Mode",
-        StepStatus::Running,
-        "正在检测 Anthropic JSON 等效输出",
-    ));
-    let (json_check, json_response) =
-        probe_anthropic_json_mode(&client, &config, &url, &headers).await;
-    progress(step_from_check(&json_check));
-    if let Some(response) = json_response {
-        http_responses.push(response);
-    }
-    checks.push(json_check);
+        progress(step_from_check(&tools_check));
+        progress(step_from_check(&stream_check));
+        progress(step_from_check(&json_check));
+
+        if let Some(response) = tools_response {
+            http_responses.push(response);
+        }
+        if let Some(response) = json_response {
+            http_responses.push(response);
+        }
+
+        checks.push(tools_check);
+        checks.push(stream_check);
+        checks.push(json_check);
+
+        stream_result
+    } else {
+        push_skipped_checks(progress, &mut checks);
+        None
+    };
 
     progress(step(
         "error_format",
@@ -301,12 +331,7 @@ async fn run_anthropic_messages_probe<'a>(
     let response_refs = http_responses.iter().collect::<Vec<_>>();
     let risk = assess_risk(&config, &checks, &response_refs, stream_response.as_ref());
     let report = build_report(&config, checks, risk);
-    progress(step(
-        "risk",
-        "逆向风险评分",
-        StepStatus::Pass,
-        "风险评分完成",
-    ));
+    progress(risk_step(&report.risk));
     Ok(report)
 }
 
@@ -331,43 +356,57 @@ async fn run_gemini_probe<'a>(
     if let Some(response) = chat_response {
         http_responses.push(response);
     }
+    let chat_passed = chat_check.status != CheckStatus::Fail;
     checks.push(chat_check);
 
-    progress(step(
-        "tools",
-        "Tools / Function Calling",
-        StepStatus::Running,
-        "正在检测 Gemini functionCall",
-    ));
-    let (tools_check, tools_response) = probe_gemini_tools(&client, &config, &url).await;
-    progress(step_from_check(&tools_check));
-    if let Some(response) = tools_response {
-        http_responses.push(response);
-    }
-    checks.push(tools_check);
+    let stream_response = if chat_passed {
+        progress(step(
+            "tools",
+            "Tools / Function Calling",
+            StepStatus::Running,
+            "正在检测 Gemini functionCall",
+        ));
+        progress(step(
+            "stream",
+            "Stream 流式",
+            StepStatus::Running,
+            "正在检测 Gemini SSE",
+        ));
+        progress(step(
+            "json_mode",
+            "JSON Mode",
+            StepStatus::Running,
+            "正在检测 Gemini responseMimeType",
+        ));
 
-    progress(step(
-        "stream",
-        "Stream 流式",
-        StepStatus::Running,
-        "正在检测 Gemini SSE",
-    ));
-    let (stream_check, stream_response) = probe_gemini_stream(&client, &config, &stream_url).await;
-    progress(step_from_check(&stream_check));
-    checks.push(stream_check);
+        let ((tools_check, tools_response), (stream_check, stream_result), (json_check, json_response)) =
+            join3(
+                probe_gemini_tools(&client, &config, &url),
+                probe_gemini_stream(&client, &config, &stream_url),
+                probe_gemini_json_mode(&client, &config, &url),
+            )
+            .await;
 
-    progress(step(
-        "json_mode",
-        "JSON Mode",
-        StepStatus::Running,
-        "正在检测 Gemini responseMimeType",
-    ));
-    let (json_check, json_response) = probe_gemini_json_mode(&client, &config, &url).await;
-    progress(step_from_check(&json_check));
-    if let Some(response) = json_response {
-        http_responses.push(response);
-    }
-    checks.push(json_check);
+        progress(step_from_check(&tools_check));
+        progress(step_from_check(&stream_check));
+        progress(step_from_check(&json_check));
+
+        if let Some(response) = tools_response {
+            http_responses.push(response);
+        }
+        if let Some(response) = json_response {
+            http_responses.push(response);
+        }
+
+        checks.push(tools_check);
+        checks.push(stream_check);
+        checks.push(json_check);
+
+        stream_result
+    } else {
+        push_skipped_checks(progress, &mut checks);
+        None
+    };
 
     progress(step(
         "error_format",
@@ -391,12 +430,7 @@ async fn run_gemini_probe<'a>(
     let response_refs = http_responses.iter().collect::<Vec<_>>();
     let risk = assess_risk(&config, &checks, &response_refs, stream_response.as_ref());
     let report = build_report(&config, checks, risk);
-    progress(step(
-        "risk",
-        "逆向风险评分",
-        StepStatus::Pass,
-        "风险评分完成",
-    ));
+    progress(risk_step(&report.risk));
     Ok(report)
 }
 
@@ -1316,6 +1350,33 @@ fn step(key: &str, label: &str, status: StepStatus, message: &str) -> ProbeProgr
         label: label.to_string(),
         status,
         message: message.to_string(),
+        protocol: None,
+    }
+}
+
+fn risk_step(risk: &RiskAssessment) -> ProbeProgress {
+    let (status, level_label) = match risk.level {
+        RiskLevel::Low => (StepStatus::Pass, "低"),
+        RiskLevel::Medium => (StepStatus::Warn, "中"),
+        RiskLevel::High => (StepStatus::Fail, "高"),
+    };
+    step(
+        "risk",
+        "逆向风险评分",
+        status,
+        &format!("风险分 {}，风险等级{}", risk.score, level_label),
+    )
+}
+
+fn push_skipped_checks<'a>(progress: &'a ProgressCallback<'a>, checks: &mut Vec<CheckResult>) {
+    for (key, label) in [
+        ("tools", "Tools / Function Calling"),
+        ("stream", "Stream 流式"),
+        ("json_mode", "JSON Mode"),
+    ] {
+        let check = CheckResult::warn(key, label, "基础聊天未通过，已跳过该检测（避免对疑似不可用上游重复请求）");
+        progress(step_from_check(&check));
+        checks.push(check);
     }
 }
 
@@ -1356,7 +1417,7 @@ fn build_report(
         risk,
     };
     report.conclusion = conclusion_for(&report);
-    report.conclusion_text = conclusion_text(report.conclusion);
+    report.conclusion_text = conclusion_text(&report);
     report
 }
 

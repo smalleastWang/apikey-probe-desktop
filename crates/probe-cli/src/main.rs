@@ -1,9 +1,10 @@
 use anyhow::{anyhow, Context, Result};
 use apikey_probe_core::{
-    infer_protocol_type, run_probe, to_json, to_markdown, to_summary, OverallConclusion,
-    ProbeConfig, ProbeReport,
+    infer_protocol_type, multi_to_json, multi_to_markdown, multi_to_summary,
+    run_multi_protocol_probe, run_probe, to_json, to_markdown, to_summary,
+    MultiProtocolProbeConfig, MultiProtocolProbeReport, OverallConclusion, ProbeConfig, ProbeReport,
 };
-use dialoguer::{theme::ColorfulTheme, Select};
+use dialoguer::{theme::ColorfulTheme, MultiSelect, Select};
 use std::{
     env, fs,
     io::{self, Read, Write},
@@ -51,29 +52,51 @@ async fn run_interactive() -> Result<u8> {
 
 async fn run_check_with_options(options: CheckOptions) -> Result<u8> {
     let api_key = options.read_api_key()?;
-    let protocol_type = options.protocol_type()?;
-    let config = ProbeConfig {
-        base_url: options.base_url,
-        api_key,
-        model: options.model,
-        protocol_type,
-        provider_name: options.provider_name,
-        note: options.note,
-        proxy_url: options.proxy_url,
-        save_api_key: false,
-    };
+    let protocols = options.resolve_protocols()?;
 
     let progress = |progress: apikey_probe_core::ProbeProgress| {
+        let prefix = progress
+            .protocol
+            .as_deref()
+            .map(|protocol| format!("{protocol} "))
+            .unwrap_or_default();
         eprintln!(
-            "[{}] {} - {}",
+            "[{}] {}{} - {}",
             progress.status_string(),
+            prefix,
             progress.label,
             progress.message
         );
     };
 
-    let report = run_probe(config, &progress).await?;
-    let output = format_report(&report, options.format)?;
+    let (output, conclusion) = if protocols.len() == 1 {
+        let config = ProbeConfig {
+            base_url: options.base_url.clone(),
+            api_key,
+            model: options.model.clone(),
+            protocol_type: protocols[0].clone(),
+            provider_name: options.provider_name.clone(),
+            note: options.note.clone(),
+            proxy_url: options.proxy_url.clone(),
+        };
+        let report = run_probe(config, &progress).await?;
+        (format_report(&report, options.format)?, report.conclusion)
+    } else {
+        let config = MultiProtocolProbeConfig {
+            base_url: options.base_url.clone(),
+            api_key,
+            model: options.model.clone(),
+            protocol_types: protocols,
+            provider_name: options.provider_name.clone(),
+            note: options.note.clone(),
+            proxy_url: options.proxy_url.clone(),
+        };
+        let report = run_multi_protocol_probe(config, &progress).await?;
+        (
+            format_multi_report(&report, options.format)?,
+            report.conclusion,
+        )
+    };
 
     if let Some(path) = options.out {
         fs::write(&path, output).with_context(|| format!("failed to write {path}"))?;
@@ -81,14 +104,14 @@ async fn run_check_with_options(options: CheckOptions) -> Result<u8> {
         println!("{output}");
     }
 
-    Ok(exit_code_for(report.conclusion, options.fail_on))
+    Ok(exit_code_for(conclusion, options.fail_on))
 }
 
 #[derive(Debug)]
 struct CheckOptions {
     base_url: String,
     model: String,
-    protocol: String,
+    protocols: Vec<String>,
     api_key: Option<String>,
     api_key_env: Option<String>,
     api_key_stdin: bool,
@@ -111,8 +134,8 @@ impl CheckOptions {
         let model = prompt_required("模型名", None)?;
         let inferred_protocol = infer_protocol_type(&model).unwrap_or("openai-compatible");
         println!("已根据模型名推测协议类型：{inferred_protocol}");
-        let protocol = prompt_select_value(
-            "协议类型",
+        let protocols = prompt_multi_select_values(
+            "协议类型（空格键选中，可多选；回车确认，至少选择一个）",
             &[
                 ("OpenAI-compatible Chat Completions", "openai-compatible"),
                 ("OpenAI Responses API", "openai-responses"),
@@ -152,7 +175,7 @@ impl CheckOptions {
         Ok(Self {
             base_url,
             model,
-            protocol,
+            protocols,
             api_key,
             api_key_env: None,
             api_key_stdin: false,
@@ -169,7 +192,7 @@ impl CheckOptions {
         let mut options = Self {
             base_url: String::new(),
             model: String::new(),
-            protocol: "auto".to_string(),
+            protocols: Vec::new(),
             api_key: None,
             api_key_env: None,
             api_key_stdin: false,
@@ -186,7 +209,15 @@ impl CheckOptions {
             match args[index].as_str() {
                 "--base-url" => options.base_url = take_value(args, &mut index, "--base-url")?,
                 "--model" => options.model = take_value(args, &mut index, "--model")?,
-                "--protocol" => options.protocol = take_value(args, &mut index, "--protocol")?,
+                "--protocol" => {
+                    let value = take_value(args, &mut index, "--protocol")?;
+                    for part in value.split(',') {
+                        let part = part.trim();
+                        if !part.is_empty() {
+                            options.protocols.push(part.to_string());
+                        }
+                    }
+                }
                 "--api-key" => options.api_key = Some(take_value(args, &mut index, "--api-key")?),
                 "--api-key-env" => {
                     options.api_key_env = Some(take_value(args, &mut index, "--api-key-env")?)
@@ -267,22 +298,42 @@ impl CheckOptions {
         Ok(trimmed)
     }
 
-    fn protocol_type(&self) -> Result<String> {
-        match self.protocol.as_str() {
-            "auto" => {
-                let inferred = infer_protocol_type(&self.model).unwrap_or("openai-compatible");
-                if inferred == "openai-compatible" && infer_protocol_type(&self.model).is_none() {
+    fn resolve_protocols(&self) -> Result<Vec<String>> {
+        let mut resolved: Vec<String> = Vec::new();
+
+        for raw in &self.protocols {
+            let value = raw.trim();
+            if value.is_empty() {
+                continue;
+            }
+
+            let concrete = if value == "auto" {
+                let inferred = infer_protocol_type(&self.model);
+                if inferred.is_none() {
                     eprintln!(
                         "protocol auto: unable to infer from model name, using openai-compatible"
                     );
                 }
-                Ok(inferred.to_string())
+                inferred.unwrap_or("openai-compatible").to_string()
+            } else {
+                match value {
+                    "openai-compatible" | "openai-responses" | "anthropic-messages"
+                    | "google-gemini" => value.to_string(),
+                    other => return Err(anyhow!("unsupported protocol: {other}")),
+                }
+            };
+
+            if !resolved.contains(&concrete) {
+                resolved.push(concrete);
             }
-            "openai-compatible" | "openai-responses" | "anthropic-messages" | "google-gemini" => {
-                Ok(self.protocol.clone())
-            }
-            value => Err(anyhow!("unsupported protocol: {value}")),
         }
+
+        if resolved.is_empty() {
+            let inferred = infer_protocol_type(&self.model).unwrap_or("openai-compatible");
+            resolved.push(inferred.to_string());
+        }
+
+        Ok(resolved)
     }
 }
 
@@ -381,6 +432,37 @@ fn prompt_select_value(label: &str, choices: &[(&str, &str)], default: &str) -> 
     Ok(choices[selection].1.to_string())
 }
 
+fn prompt_multi_select_values(
+    label: &str,
+    choices: &[(&str, &str)],
+    default: &str,
+) -> Result<Vec<String>> {
+    let labels = choices.iter().map(|(label, _)| *label).collect::<Vec<_>>();
+    let defaults = choices
+        .iter()
+        .map(|(_, value)| *value == default)
+        .collect::<Vec<_>>();
+
+    loop {
+        let selection = MultiSelect::with_theme(&ColorfulTheme::default())
+            .with_prompt(label)
+            .items(&labels)
+            .defaults(&defaults)
+            .interact()
+            .with_context(|| format!("failed to read selection for {label}"))?;
+
+        if selection.is_empty() {
+            println!("请至少选择一个协议（使用空格键选中）。");
+            continue;
+        }
+
+        return Ok(selection
+            .into_iter()
+            .map(|index| choices[index].1.to_string())
+            .collect());
+    }
+}
+
 fn prompt_line(label: &str, default: Option<&str>, hint: Option<&str>) -> Result<String> {
     print!("{label}");
     if let Some(default) = default {
@@ -417,6 +499,14 @@ fn format_report(report: &ProbeReport, format: OutputFormat) -> Result<String> {
         OutputFormat::Summary => Ok(to_summary(report)),
         OutputFormat::Json => to_json(report).context("failed to serialize JSON"),
         OutputFormat::Markdown => Ok(to_markdown(report)),
+    }
+}
+
+fn format_multi_report(report: &MultiProtocolProbeReport, format: OutputFormat) -> Result<String> {
+    match format {
+        OutputFormat::Summary => Ok(multi_to_summary(report)),
+        OutputFormat::Json => multi_to_json(report).context("failed to serialize JSON"),
+        OutputFormat::Markdown => Ok(multi_to_markdown(report)),
     }
 }
 
@@ -465,7 +555,10 @@ Options:
   --interactive, -i                 Prompt for fields in the terminal
   --protocol <value>                auto, openai-compatible, openai-responses,
                                     anthropic-messages, google-gemini
-                                    default: auto
+                                    default: auto (inferred from model name)
+                                    Repeat or comma-separate to test multiple
+                                    protocols, e.g. --protocol openai-compatible
+                                    --protocol openai-responses
   --provider-name <name>            Optional provider name for report archive
   --proxy-url <url>                 HTTP proxy URL
   --note <text>                     Optional note
@@ -481,6 +574,11 @@ Examples:
 
   apikey-probe --base-url https://api.example.com/v1 \
     --api-key-env UPSTREAM_API_KEY --model gpt-4o --format markdown --out report.md
+
+  # Test one model against two OpenAI protocols at once
+  apikey-probe --base-url https://api.example.com/v1 \
+    --api-key-env UPSTREAM_API_KEY --model gpt-4o \
+    --protocol openai-compatible --protocol openai-responses --format markdown --out report.md
 
   printf "%s" "$UPSTREAM_API_KEY" | apikey-probe \
     --base-url https://api.example.com/v1 --api-key-stdin --model claude-3-5-sonnet-latest"#

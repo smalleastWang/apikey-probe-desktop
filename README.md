@@ -29,6 +29,23 @@
 - `claude-*` 推导为 `anthropic-messages`
 - `gemini-*` 推导为 `google-gemini`
 
+### 检测性能：单协议内部并行
+
+单个协议的检测流程为：先跑「基础聊天」，通过后再并行执行「Tools / Stream / JSON Mode」三项，最后跑「错误格式」并汇总风险评分。
+
+- 基础聊天通过后三项并行，明显缩短单次检测耗时。
+- 基础聊天失败时，直接跳过后续三项（标记为「已跳过」），避免对疑似不可用的上游重复请求。
+- 该优化在 `probe-core` 中实现，桌面端和 CLI 无需改动即可受益。
+
+### 多协议同时验货
+
+一个模型可以一次性对多个协议验货，尤其适合 OpenAI 系模型可能同时支持 `openai-compatible` 与 `openai-responses` 的场景。
+
+- 协议之间串行执行（避免瞬时对同一上游并发过多请求），每个协议内部仍然并行。
+- 综合结论取各协议中的最优结果（任一协议 PASS 即综合 PASS），并标注「表现最佳协议」。
+- 桌面端协议选择改为多选复选框；CLI 通过重复 `--protocol` 或逗号分隔传入多个协议，交互模式下用空格多选。
+- 多协议报告支持导出 JSON / Markdown，包含各协议结论概览表与每个协议的完整明细。
+
 ## 桌面端截图
 
 ![桌面端检测页](docs/screenshots/desktop-main.svg)
@@ -94,10 +111,10 @@ React UI。
 
 负责：
 
-- 表单输入
-- 检测进度展示
-- 报告摘要展示
-- 报告详情页
+- 表单输入（协议类型为多选复选框，可一次选多个协议）
+- 检测进度展示（多协议时按协议分组显示各自进度）
+- 报告摘要展示（多协议时展示综合结论与各协议结论）
+- 报告详情页（单协议或多协议明细）
 - 导出按钮和桌面文件夹选择
 
 协议推导通过 Tauri command 调用 `probe-core`，不在前端重复维护规则。
@@ -109,9 +126,9 @@ React UI。
 负责：
 
 - 终端交互输入
-- 上下键选择协议类型、输出格式、退出码阈值
-- 参数解析
-- 调用 `probe-core`
+- 空格多选协议类型（可多选），上下键选择输出格式、退出码阈值
+- 参数解析（`--protocol` 可重复或逗号分隔以测试多个协议）
+- 调用 `probe-core`（单协议走 `run_probe`，多协议走 `run_multi_protocol_probe`）
 - 输出到终端或文件
 
 不负责探针业务判断。
@@ -313,6 +330,43 @@ API Key:
   --out report.json
 ```
 
+#### 一次对多个协议验货
+
+对同一模型同时测试 `openai-compatible` 与 `openai-responses`，重复 `--protocol` 或逗号分隔均可：
+
+```bash
+./target/release/apikey-probe \
+  --base-url https://api.example.com/v1 \
+  --api-key-env UPSTREAM_API_KEY \
+  --model gpt-4o \
+  --protocol openai-compatible \
+  --protocol openai-responses \
+  --format markdown \
+  --out report.md
+
+# 等价写法
+./target/release/apikey-probe \
+  --base-url https://api.example.com/v1 \
+  --api-key-env UPSTREAM_API_KEY \
+  --model gpt-4o \
+  --protocol openai-compatible,openai-responses \
+  --format markdown \
+  --out report.md
+```
+
+多协议摘要输出示例：
+
+```text
+综合结论：PASS
+模型：gpt-4o
+表现最佳协议：openai-compatible
+结论说明：建议接入：至少一种协议下基础聊天、tools、stream、JSON mode 等核心能力通过。
+
+各协议结论：
+- [PASS] openai-compatible（风险 0，LOW）
+- [WARN] openai-responses（风险 15，LOW）
+```
+
 #### 只在终端输出摘要
 
 ```bash
@@ -370,7 +424,7 @@ printf "%s" "$UPSTREAM_API_KEY" | ./target/release/apikey-probe \
 
 - `--base-url <url>`：上游 Base URL
 - `--model <name>`：模型名
-- `--protocol <value>`：协议类型，默认 `auto`
+- `--protocol <value>`：协议类型，默认 `auto`（按模型名推导）；可重复传入或逗号分隔以同时测试多个协议，例如 `--protocol openai-compatible --protocol openai-responses`
 - `--api-key-env <name>`：从环境变量读取 API Key，推荐脚本使用
 - `--api-key-stdin`：从 stdin 读取 API Key
 - `--api-key <key>`：直接传 API Key，不推荐，会进入 shell history

@@ -22,17 +22,53 @@ pub fn conclusion_for(report: &ProbeReport) -> OverallConclusion {
     OverallConclusion::Pass
 }
 
-pub fn conclusion_text(conclusion: OverallConclusion) -> String {
-    match conclusion {
+pub fn conclusion_text(report: &ProbeReport) -> String {
+    let chat_failed = report
+        .checks
+        .iter()
+        .any(|check| check.key == "chat" && check.status == CheckStatus::Fail);
+    let weak_abilities = report
+        .checks
+        .iter()
+        .filter(|check| check.key != "chat" && check.status != CheckStatus::Pass)
+        .map(|check| check.label.clone())
+        .collect::<Vec<_>>();
+
+    match report.conclusion {
         OverallConclusion::Pass => {
             "建议接入：基础聊天、tools、stream、JSON mode 等核心能力通过，逆向风险较低。"
                 .to_string()
         }
         OverallConclusion::Warn => {
-            "谨慎接入：基础能力可能可用，但存在能力缺失、格式不标准或中等风险。".to_string()
+            let mut reasons = Vec::new();
+            if !weak_abilities.is_empty() {
+                reasons.push(format!("以下能力未完全通过：{}", weak_abilities.join("、")));
+            }
+            if report.risk.level == RiskLevel::Medium {
+                reasons.push(format!("逆向/中转风险中等（风险分 {}）", report.risk.score));
+            }
+            if reasons.is_empty() {
+                "谨慎接入：基础能力可能可用，但存在能力缺失或格式不标准。".to_string()
+            } else {
+                format!("谨慎接入：{}。", reasons.join("；"))
+            }
         }
         OverallConclusion::Fail => {
-            "不建议接入：基础聊天失败，或存在高逆向/中转/不稳定供货风险。".to_string()
+            let mut reasons = Vec::new();
+            if chat_failed {
+                reasons.push("基础聊天失败，无法确认该上游可用".to_string());
+            }
+            if report.risk.level == RiskLevel::High {
+                reasons.push(format!(
+                    "逆向/中转/不稳定供货风险偏高（风险分 {}）",
+                    report.risk.score
+                ));
+            }
+            if reasons.is_empty() {
+                "不建议接入：存在严重问题，核心能力未达标。".to_string()
+            } else {
+                format!("不建议接入：{}。", reasons.join("；"))
+            }
         }
     }
 }
